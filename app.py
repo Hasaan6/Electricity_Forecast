@@ -1,100 +1,68 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
-from pmdarima import auto_arima
-from datetime import timedelta
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+import numpy as np
 
-# Streamlit page settings
-st.set_page_config(page_title="⚡ Electricity Forecast App", layout="wide")
-sns.set_style("whitegrid")
+# --- Page Config ---
+st.set_page_config(page_title="Electricity Forecast", layout="wide")
+st.title("🔌 Electricity Consumption Forecasting")
 
-# Load and preprocess data
-@st.cache_data
-def load_data():
-    df = pd.read_csv("data.csv")
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values('date')
-    df = df.set_index('date')
-    df = df.fillna(method='ffill')
-    return df
+# --- Load Data ---
+df = pd.read_csv("data.csv", parse_dates=['date'])
+df.set_index('date', inplace=True)
+df = df.asfreq('D')
+df['consumption'] = df['consumption'].interpolate()
+df['temperature'] = df['temperature'].interpolate()
 
-df = load_data()
+st.subheader("📊 Raw Data")
+st.dataframe(df)
 
-# Sidebar controls
-st.sidebar.title("⚙ Controls")
-households = df['household'].unique()
-selected_household = st.sidebar.selectbox("Select Household", households)
-temp_min, temp_max = st.sidebar.slider("Temperature Range (°C)",
-                                       float(df['temperature'].min()),
-                                       float(df['temperature'].max()),
-                                       (float(df['temperature'].min()), float(df['temperature'].max())))
-n_days = st.sidebar.slider("Days to Forecast", 7, 60, 14)
+# --- Plot Historical ---
+st.subheader("📈 Electricity Consumption Over Time")
+st.line_chart(df['consumption'])
 
-# Filter data
-filtered_df = df[(df['household'] == selected_household) &
-                 (df['temperature'] >= temp_min) &
-                 (df['temperature'] <= temp_max)]
+# --- Forecasting ---
+st.subheader("🔮 Forecasted Consumption")
 
-# Title
-st.title("⚡ Advanced Electricity Consumption Forecasting")
-st.markdown(f"Forecasting for **Household {selected_household}** based on historical trends.")
+try:
+    # --- Future temperature estimate (use last 7 days' avg as placeholder) ---
+    avg_temp = df['temperature'][-7:].mean()
+    future_temps = pd.Series([avg_temp] * 7, name='temperature')
 
-# Summary statistics
-col1, col2, col3 = st.columns(3)
-col1.metric("Average Consumption", f"{filtered_df['consumption'].mean():.2f} kWh")
-col2.metric("Max Consumption", f"{filtered_df['consumption'].max():.2f} kWh")
-col3.metric("Min Consumption", f"{filtered_df['consumption'].min():.2f} kWh")
+    # --- Fit SARIMAX with exogenous variable ---
+    model = SARIMAX(df['consumption'], exog=df[['temperature']], order=(1,1,1), seasonal_order=(1,1,1,7))
+    model_fit = model.fit(disp=False)
 
-# Moving average for trend
-filtered_df['MA7'] = filtered_df['consumption'].rolling(window=7).mean()
+    # --- Forecast ---
+    forecast_steps = 7
+    future_dates = pd.date_range(start=df.index[-1] + pd.Timedelta(days=1), periods=forecast_steps)
+    forecast = model_fit.forecast(steps=forecast_steps, exog=future_temps)
 
-# Historical plot
-st.subheader("📊 Historical Consumption & Trend")
-fig, ax = plt.subplots(figsize=(12, 5))
-ax.plot(filtered_df.index, filtered_df['consumption'], label="Consumption", color='blue')
-ax.plot(filtered_df.index, filtered_df['MA7'], label="7-Day Moving Avg", color='orange')
-ax.set_ylabel("kWh")
-ax.legend()
-st.pyplot(fig)
+    # --- Combine forecast with actual ---
+    forecast_df = pd.DataFrame({'Forecast': forecast}, index=future_dates)
+    combined = pd.concat([df['consumption'], forecast_df['Forecast']])
 
-# Anomaly detection (high usage > mean + 2*std)
-threshold = filtered_df['consumption'].mean() + 2 * filtered_df['consumption'].std()
-anomalies = filtered_df[filtered_df['consumption'] > threshold]
+    # --- Plot ---
+    st.line_chart(combined)
 
-# Show anomalies if any
-if not anomalies.empty:
-    st.warning(f"⚠ High-usage days detected: {len(anomalies)} days")
-    st.dataframe(anomalies)
+    # --- Forecast Table ---
+    st.write("### 📅 Forecasted Values")
+    st.dataframe(forecast_df)
 
-# Model training
-model = auto_arima(filtered_df['consumption'], seasonal=True, m=7, suppress_warnings=True)
-model.fit(filtered_df['consumption'])
+    # --- Pie Chart: Historical vs Forecasted ---
+    st.subheader("📊 Historical vs Forecasted Total")
+    total_hist = df['consumption'].sum()
+    total_fore = forecast_df['Forecast'].sum()
 
-# Forecasting
-future_dates = pd.date_range(start=filtered_df.index[-1] + timedelta(days=1), periods=n_days)
-forecast = model.predict(n_periods=n_days)
-forecast_df = pd.DataFrame({'date': future_dates, 'forecast': forecast})
-forecast_df = forecast_df.set_index('date')
+    fig, ax = plt.subplots()
+    ax.pie([total_hist, total_fore],
+           labels=['Historical', 'Forecasted'],
+           autopct='%1.1f%%',
+           startangle=90,
+           colors=['skyblue', 'orange'])
+    ax.axis('equal')
+    st.pyplot(fig)
 
-# Forecast plot
-st.subheader(f"🔮 {n_days}-Day Forecast")
-fig2, ax2 = plt.subplots(figsize=(12, 5))
-ax2.plot(filtered_df.index, filtered_df['consumption'], label="Historical", color='blue')
-ax2.plot(forecast_df.index, forecast_df['forecast'], label="Forecast", color='red', linestyle='--')
-ax2.set_ylabel("kWh")
-ax2.legend()
-st.pyplot(fig2)
-
-# Forecast table
-st.subheader("📋 Forecast Table")
-st.dataframe(forecast_df.style.format("{:.2f}"))
-
-# Download button
-csv = forecast_df.to_csv().encode('utf-8')
-st.download_button("⬇ Download Forecast Data", data=csv, file_name="forecast.csv", mime="text/csv")
-
-# Footer
-st.markdown("---")
-st.caption("Created with ❤️ using Streamlit & Auto-ARIMA")
+except Exception as e:
+    st.error(f"⚠️ Forecasting Error: {e}")
