@@ -1,9 +1,5 @@
 streamlit
 pandas
 matplotlib
-scikit-learn
 statsmodels
-pmdarima
-plotly
-seaborn
-altair
+numpy
